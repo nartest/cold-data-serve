@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "indexer",
+    "server",
+    "cold_search_core",
+]
+resolver = "2"

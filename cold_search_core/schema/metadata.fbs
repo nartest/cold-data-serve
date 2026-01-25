@@ -1,0 +1,13 @@
+namespace metadata;
+
+table MetadataItem {
+  id: uint64;
+  data: [ubyte]; // This will hold the serialized MessagePack or similar if needed, 
+                 // but let's try to keep it simple with explicit fields for now.
+}
+
+table MetadataItems {
+  items: [MetadataItem];
+}
+
+root_type MetadataItems;

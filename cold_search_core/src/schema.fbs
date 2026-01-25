@@ -1,0 +1,24 @@
+table TextWrapper { value: string; }
+table IntegerWrapper { value: int64; }
+table FloatWrapper { value: float64; }
+table BooleanWrapper { value: bool; }
+table DateWrapper { value: int32; }
+table DateTimeWrapper { value: int64; }
+
+union Value {
+    Text: TextWrapper,
+    Integer: IntegerWrapper,
+    Float: FloatWrapper,
+    Boolean: BooleanWrapper,
+    Date: DateWrapper,
+    DateTime: DateTimeWrapper,
+}
+
+table Field {
+    key: string;
+    value: Value;
+}
+
+table Entry {
+    fields: [Field];
+}

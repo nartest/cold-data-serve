@@ -1,0 +1,21 @@
+[package]
+name = "cold_search_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memmap2 = "0.9"
+planus = "1.1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+roaring = "0.10"
+fst = "0.4"
+deunicode = "0.4"
+h3o = { version = "0.5", features = ["geo"] }
+anyhow = "1.0"
+ordered-float = "5.1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.8"

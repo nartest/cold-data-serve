@@ -1,0 +1,51 @@
+# Build artifacts
+target/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+server.log
+
+# Data directories (generated indices)
+data_out/
+data_out_new/
+data_bano/
+data_test/
+data_test_range/
+
+# Individual binary index files
+*.bin
+*.offsets
+*.fst
+*.fst.data
+*.fst.offsets
+*.idx
+*.ecef
+*.range.idx
+*.vals
+*.col
+*.dict
+indexing.db
+
+# Source data files (large)
+*.csv
+*.csv.gz
+*.parquet
+bano-68.csv
+test.csv
+test.parquet
+
+# Tests (as requested: "pas les scénarios de test")
+tests/
+
+# Python environment
+__pycache__/
+*.pyc
+.venv/
+env/
