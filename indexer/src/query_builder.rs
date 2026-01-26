@@ -13,20 +13,36 @@ impl QueryBuilder {
         let mut geo_col = None;
 
         for idx in &config.indexes {
-            if idx.r#type == IndexType::GeoPoint {
+            if idx.r#type == IndexType::Geo {
                 geo_col = Some(&idx.column);
             }
         }
 
         if let Some(col) = geo_col {
-            extra_columns.push(format!("st_x({}) AS _idx_lon", col));
-            extra_columns.push(format!("st_y({}) AS _idx_lat", col));
-            extra_columns.push(format!("(6371000 * cos(radians(st_y({}))) * cos(radians(st_x({})) ))::FLOAT as _idx_ecef_x", col, col));
-            extra_columns.push(format!("(6371000 * cos(radians(st_y({}))) * sin(radians(st_x({})) ))::FLOAT as _idx_ecef_y", col, col));
+            // For H3 compatibility (uses _idx_lon/_idx_lat)
             extra_columns.push(format!(
-                "(6371000 * sin(radians(st_y({})) ))::FLOAT as _idx_ecef_z",
+                "st_xmin({0}) AS _idx_lon, st_ymin({0}) AS _idx_lat",
                 col
             ));
+            // For uniform sorting
+            extra_columns.push(format!(
+                "st_xmin({0}) AS _idx_xmin, st_ymin({0}) AS _idx_ymin",
+                col
+            ));
+            // ECEF coordinates based on min point
+            extra_columns.push(format!("(6371000 * cos(radians(st_ymin({0}))) * cos(radians(st_xmin({0}))) )::FLOAT as _idx_ecef_x", col));
+            extra_columns.push(format!("(6371000 * cos(radians(st_ymin({0}))) * sin(radians(st_xmin({0}))) )::FLOAT as _idx_ecef_y", col));
+            extra_columns.push(format!(
+                "(6371000 * sin(radians(st_ymin({0}))) )::FLOAT as _idx_ecef_z",
+                col
+            ));
+            // Geometry type for detection
+            extra_columns.push(format!(
+                "st_geometrytype({0})::VARCHAR AS _idx_geometry_type",
+                col
+            ));
+            // WKB for FGB generation
+            extra_columns.push(format!("st_aswkb({0}) AS _idx_wkb", col));
         }
 
         let select_extra = if extra_columns.is_empty() {
@@ -41,7 +57,7 @@ impl QueryBuilder {
         );
 
         if geo_col.is_some() {
-            query.push_str(" ORDER BY _idx_lat, _idx_lon");
+            query.push_str(" ORDER BY _idx_ymin, _idx_xmin");
         }
 
         query
@@ -78,14 +94,15 @@ storage:
   columns: ["id", "geom"]
 indexes:
   - column: "geom"
-    type: "geo_point"
+    type: "geo"
 "#;
         let config = ConfigV2::from_yaml_str(yaml).unwrap();
         let query = QueryBuilder::build_stage_query(&config);
 
         assert!(query.contains("CREATE TABLE stage_indexation"));
         assert!(query.contains("_idx_ecef_x"));
-        assert!(query.contains("ORDER BY _idx_lat, _idx_lon"));
+        assert!(query.contains("_idx_geometry_type"));
+        assert!(query.contains("ORDER BY _idx_ymin, _idx_xmin"));
     }
 
     #[test]
@@ -101,7 +118,7 @@ storage:
   columns: ["id", "geom"]
 indexes:
   - column: "geom"
-    type: "geo_point"
+    type: "geo"
 "#;
         // Créer un fichier CSV temporaire
         let csv_content = "id,lat,lon\n1,48.8566,2.3522\n2,45.7640,4.8357";
@@ -130,6 +147,7 @@ indexes:
                 assert!(cols.contains(&"id".to_string()));
                 assert!(cols.contains(&"_idx_ecef_x".to_string()));
                 assert!(cols.contains(&"_idx_lat".to_string()));
+                assert!(cols.contains(&"_idx_geometry_type".to_string()));
             }
             Err(e) => {
                 // Si l'extension spatiale n'est pas dispo, on ignore l'erreur d'exécution

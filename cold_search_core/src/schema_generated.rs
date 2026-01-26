@@ -2244,6 +2244,8 @@ mod root {
     pub struct Entry {
         /// The field `fields` in the table `Entry`
         pub fields: ::core::option::Option<::planus::alloc::vec::Vec<self::Field>>,
+        /// The field `geometry` in the table `Entry`
+        pub geometry: ::core::option::Option<::planus::alloc::vec::Vec<u8>>,
     }
 
     #[allow(clippy::derivable_impls)]
@@ -2251,6 +2253,7 @@ mod root {
         fn default() -> Self {
             Self {
                 fields: ::core::default::Default::default(),
+                geometry: ::core::default::Default::default(),
             }
         }
     }
@@ -2268,19 +2271,27 @@ mod root {
             field_fields: impl ::planus::WriteAsOptional<
                 ::planus::Offset<[::planus::Offset<self::Field>]>,
             >,
+            field_geometry: impl ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
         ) -> ::planus::Offset<Self> {
             let prepared_fields = field_fields.prepare(builder);
+            let prepared_geometry = field_geometry.prepare(builder);
 
-            let mut table_writer: ::planus::table_writer::TableWriter<6> =
+            let mut table_writer: ::planus::table_writer::TableWriter<8> =
                 ::core::default::Default::default();
             if prepared_fields.is_some() {
                 table_writer.write_entry::<::planus::Offset<[::planus::Offset<self::Field>]>>(0);
+            }
+            if prepared_geometry.is_some() {
+                table_writer.write_entry::<::planus::Offset<[u8]>>(1);
             }
 
             unsafe {
                 table_writer.finish(builder, |object_writer| {
                     if let ::core::option::Option::Some(prepared_fields) = prepared_fields {
                         object_writer.write::<_, _, 4>(&prepared_fields);
+                    }
+                    if let ::core::option::Option::Some(prepared_geometry) = prepared_geometry {
+                        object_writer.write::<_, _, 4>(&prepared_geometry);
                     }
                 });
             }
@@ -2312,7 +2323,7 @@ mod root {
     impl ::planus::WriteAsOffset<Entry> for Entry {
         #[inline]
         fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<Entry> {
-            Entry::create(builder, &self.fields)
+            Entry::create(builder, &self.fields, &self.geometry)
         }
     }
 
@@ -2343,6 +2354,26 @@ mod root {
     }
 
     impl<T0> EntryBuilder<(T0,)> {
+        /// Setter for the [`geometry` field](Entry#structfield.geometry).
+        #[inline]
+        #[allow(clippy::type_complexity)]
+        pub fn geometry<T1>(self, value: T1) -> EntryBuilder<(T0, T1)>
+        where
+            T1: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+        {
+            let (v0,) = self.0;
+            EntryBuilder((v0, value))
+        }
+
+        /// Sets the [`geometry` field](Entry#structfield.geometry) to null.
+        #[inline]
+        #[allow(clippy::type_complexity)]
+        pub fn geometry_as_null(self) -> EntryBuilder<(T0, ())> {
+            self.geometry(())
+        }
+    }
+
+    impl<T0, T1> EntryBuilder<(T0, T1)> {
         /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [Entry].
         #[inline]
         pub fn finish(self, builder: &mut ::planus::Builder) -> ::planus::Offset<Entry>
@@ -2353,8 +2384,10 @@ mod root {
         }
     }
 
-    impl<T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::Field>]>>>
-        ::planus::WriteAs<::planus::Offset<Entry>> for EntryBuilder<(T0,)>
+    impl<
+            T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::Field>]>>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+        > ::planus::WriteAs<::planus::Offset<Entry>> for EntryBuilder<(T0, T1)>
     {
         type Prepared = ::planus::Offset<Entry>;
 
@@ -2364,8 +2397,10 @@ mod root {
         }
     }
 
-    impl<T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::Field>]>>>
-        ::planus::WriteAsOptional<::planus::Offset<Entry>> for EntryBuilder<(T0,)>
+    impl<
+            T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::Field>]>>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+        > ::planus::WriteAsOptional<::planus::Offset<Entry>> for EntryBuilder<(T0, T1)>
     {
         type Prepared = ::planus::Offset<Entry>;
 
@@ -2378,13 +2413,15 @@ mod root {
         }
     }
 
-    impl<T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::Field>]>>>
-        ::planus::WriteAsOffset<Entry> for EntryBuilder<(T0,)>
+    impl<
+            T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::Field>]>>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+        > ::planus::WriteAsOffset<Entry> for EntryBuilder<(T0, T1)>
     {
         #[inline]
         fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<Entry> {
-            let (v0,) = &self.0;
-            Entry::create(builder, v0)
+            let (v0, v1) = &self.0;
+            Entry::create(builder, v0, v1)
         }
     }
 
@@ -2402,6 +2439,12 @@ mod root {
         > {
             self.0.access(0, "Entry", "fields")
         }
+
+        /// Getter for the [`geometry` field](Entry#structfield.geometry).
+        #[inline]
+        pub fn geometry(&self) -> ::planus::Result<::core::option::Option<&'a [u8]>> {
+            self.0.access(1, "Entry", "geometry")
+        }
     }
 
     impl<'a> ::core::fmt::Debug for EntryRef<'a> {
@@ -2409,6 +2452,9 @@ mod root {
             let mut f = f.debug_struct("EntryRef");
             if let ::core::option::Option::Some(field_fields) = self.fields().transpose() {
                 f.field("fields", &field_fields);
+            }
+            if let ::core::option::Option::Some(field_geometry) = self.geometry().transpose() {
+                f.field("geometry", &field_geometry);
             }
             f.finish()
         }
@@ -2425,6 +2471,7 @@ mod root {
                 } else {
                     ::core::option::Option::None
                 },
+                geometry: value.geometry()?.map(|v| v.to_vec()),
             })
         }
     }

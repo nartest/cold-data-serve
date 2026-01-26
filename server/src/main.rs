@@ -66,13 +66,13 @@ async fn http_get(
 
     // Try primary key first
     if let Some(item) = engine.get_by_key(&key) {
-        return Json(item.to_json()).into_response();
+        return Json(item.to_json_value()).into_response();
     }
 
     // Fallback to internal ID
     if let Ok(id) = key.parse::<u64>() {
         if let Some(item) = engine.get(id) {
-            return Json(item.to_json()).into_response();
+            return Json(item.to_json_value()).into_response();
         }
     }
 
@@ -207,6 +207,7 @@ async fn http_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                         name: engine.name.clone(),
                         size: 0,
                         indexes: Vec::new(),
+                        geometry_type: None,
                     }
                 });
 

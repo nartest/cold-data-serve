@@ -18,3 +18,6 @@ deunicode = "0.4"
 planus = "1.1.0"
 rayon = "1.8"
 chrono = "0.4"
+flatgeobuf = "6.0"
+geozero = { version = "0.15", features = ["with-wkb", "with-geo"] }
+geo = "0.32"

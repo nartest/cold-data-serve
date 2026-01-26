@@ -21,4 +21,5 @@ table Field {
 
 table Entry {
     fields: [Field];
+    geometry: [ubyte];
 }

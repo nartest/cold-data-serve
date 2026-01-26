@@ -39,7 +39,7 @@ pub struct IndexConfig {
 pub enum IndexType {
     Text,
     Bitmap,
-    GeoPoint,
+    Geo,
     Range,
     Date,
     DateTime,
@@ -65,9 +65,9 @@ impl ConfigV2 {
             ));
         }
 
-        // Pour chaque index, vérifier la cohérence (ex: géo_point a une résolution)
+        // Pour chaque index, vérifier la cohérence (ex: géo a une résolution pour H3)
         for idx in &self.indexes {
-            if idx.r#type == IndexType::GeoPoint && idx.resolution.is_none() {
+            if idx.r#type == IndexType::Geo && idx.resolution.is_none() {
                 // On pourrait mettre une valeur par défaut, mais validation stricte ici si besoin
             }
         }
@@ -112,7 +112,7 @@ indexes:
     type: "bitmap"
 
   - column: "geom"
-    type: "geo_point"
+    type: "geo"
     resolution: 8
 
   - column: "score"
@@ -126,7 +126,7 @@ indexes:
         assert_eq!(config.storage.primary_key, "id");
         assert_eq!(config.indexes.len(), 4);
         assert_eq!(config.indexes[0].r#type, IndexType::Text);
-        assert_eq!(config.indexes[2].r#type, IndexType::GeoPoint);
+        assert_eq!(config.indexes[2].r#type, IndexType::Geo);
         assert_eq!(config.indexes[2].resolution, Some(8));
     }
 }

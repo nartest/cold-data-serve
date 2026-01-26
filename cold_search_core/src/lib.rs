@@ -28,16 +28,25 @@ use deunicode::deunicode;
 use fst::{Automaton, IntoStreamer, Map, Streamer};
 use h3o::{LatLng, Resolution};
 use memmap2::Mmap;
+use ordered_float::OrderedFloat;
 use planus::ReadAsRoot;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
+
+use flatgeobuf::FallibleStreamingIterator;
+use flatgeobuf::FeatureProperties;
+use geo::ClosestPoint;
+use geo::Contains;
+use geo::Distance;
+use geo::Haversine;
+use geozero::wkb::Wkb;
+use geozero::ToGeo;
 
 /// Convert text to a normalized slug: remove accents, lowercase, keep only ASCII alphanumeric.
 pub fn slugify(text: &str) -> String {
@@ -54,6 +63,7 @@ pub struct RuntimeConfig {
 pub struct MetadataStore {
     offsets_mmap: Mmap,
     data_mmap: Mmap,
+    pub all_ids: RoaringBitmap,
 }
 
 impl MetadataStore {
@@ -63,9 +73,14 @@ impl MetadataStore {
         let offsets_mmap = unsafe { Mmap::map(&offsets_file)? };
         let data_file = File::open(dir.join("data.bin"))?;
         let data_mmap = unsafe { Mmap::map(&data_file)? };
+
+        let num_docs = (offsets_mmap.len() / 8).saturating_sub(1) as u32;
+        let all_ids = RoaringBitmap::from_iter(1..=num_docs);
+
         Ok(Self {
             offsets_mmap,
             data_mmap,
+            all_ids,
         })
     }
 
@@ -127,6 +142,7 @@ pub struct SourceMetadata {
     pub name: String,
     pub size: u64,
     pub indexes: Vec<IndexMetadata>,
+    pub geometry_type: Option<String>,
 }
 
 pub struct IndexStore {
@@ -139,6 +155,7 @@ pub struct IndexStore {
     pub coords_mmap: Option<Mmap>,
     pub ranges: HashMap<String, RangeIndex>,
     pub primary_mmap: Option<Mmap>,
+    pub fgb: HashMap<String, Mmap>,
 }
 
 impl IndexStore {
@@ -370,6 +387,22 @@ impl IndexStore {
             }
         }
 
+        let mut fgb = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                    if filename.ends_with(".fgb") {
+                        let field = filename.trim_end_matches(".fgb").to_string();
+                        if let Ok(file) = File::open(&path) {
+                            let mmap = unsafe { Mmap::map(&file)? };
+                            fgb.insert(field, mmap);
+                        }
+                    }
+                }
+            }
+        }
+
         let primary_mmap = if let Ok(file) = File::open(dir.join("primary.fst")) {
             Some(unsafe { Mmap::map(&file)? })
         } else {
@@ -386,6 +419,7 @@ impl IndexStore {
             coords_mmap,
             ranges,
             primary_mmap,
+            fgb,
         })
     }
 
@@ -498,14 +532,7 @@ impl Engine {
     }
 
     fn get_all_ids(&self) -> RoaringBitmap {
-        let mut all = RoaringBitmap::new();
-        if let Some(coords) = &self.index.coords_mmap {
-            let num_docs = (coords.len() / 12) as u32;
-            for i in 1..=num_docs {
-                all.insert(i);
-            }
-        }
-        all
+        self.metadata.all_ids.clone()
     }
 
     fn parse_range_value(&self, field: &str, value: &str) -> Option<f64> {
@@ -786,8 +813,8 @@ impl Engine {
             }
         }
 
-        if let (Some([lat, lon]), None, Some(limit_val)) = (center, radius_m, limit) {
-            if bbox.is_none() {
+        if let (Some([lat, lon]), Some(limit_val)) = (center, limit) {
+            if bbox.is_none() && !self.index.h3.is_empty() {
                 let adaptive_start = Instant::now();
                 let mut available_res: Vec<u8> = self.index.h3.keys().cloned().collect();
                 available_res.sort_by(|a, b| b.cmp(a));
@@ -802,26 +829,38 @@ impl Engine {
                         } else {
                             limit_val as u64
                         };
+
+                        // Si radius_m est présent, on estime le nombre d'anneaux k max
+                        // La distance entre centres de cellules H3 à res 10 est d'environ 1.1km
+                        // Pour être sûr, on peut utiliser une limite large de k, ou s'arrêter dès qu'on dépasse radius_m.
+
                         debug_log!(
-                            "[{:.3?}] Adaptive H3 starting (target: {})",
+                            "[{:.3?}] Adaptive H3 starting (target: {}, radius_m: {:?})",
                             start_time.elapsed(),
-                            target_candidates
+                            target_candidates,
+                            radius_m
                         );
-                        for k in 0..100 {
+                        for k in 0..200 {
                             let ring: Vec<h3o::CellIndex> = center_cell.grid_disk(k);
                             for cell in ring {
                                 if let Some(bitmap) = index_map.get(&u64::from(cell)) {
                                     geo_candidates |= bitmap;
                                 }
                             }
+
+                            // Si on a un rayon max, on pourrait s'arrêter prématurément si l'anneau k
+                            // dépasse largement le rayon. Mais l'intersection avec `candidates`
+                            // filtrera déjà par rayon plus tard si on utilise spatial_refinement.
+                            // Pour l'instant, on se concentre sur le fait d'avoir assez de candidats.
+
                             let intersection = geo_candidates.clone() & candidates.clone();
                             if intersection.len() >= target_candidates && k >= 1 {
                                 debug_log!("[{:.3?}] Adaptive H3 found {} candidates at k={} (took {:.3?})", start_time.elapsed(), intersection.len(), k, adaptive_start.elapsed());
                                 candidates = intersection;
                                 break;
                             }
-                            if k == 99 {
-                                debug_log!("[{:.3?}] Adaptive H3 reached max radius (k=99), found {} candidates", start_time.elapsed(), intersection.len());
+                            if k == 199 {
+                                debug_log!("[{:.3?}] Adaptive H3 reached max radius (k=199), found {} candidates", start_time.elapsed(), intersection.len());
                                 candidates = intersection;
                             }
                         }
@@ -830,38 +869,148 @@ impl Engine {
             }
         }
 
-        if let (Some(center_pt), Some(radius_val)) = (center, radius_m) {
-            let r = 6371000.0;
-            let center_ecef = {
-                let lat_rad = center_pt[0].to_radians();
-                let lon_rad = center_pt[1].to_radians();
-                let x = r * lat_rad.cos() * lon_rad.cos();
-                let y = r * lat_rad.cos() * lon_rad.sin();
-                let z = r * lat_rad.sin();
-                Some((x as f32, y as f32, z as f32))
-            };
-            let radius_sq = Some(radius_val * radius_val);
+        let mut fgb_distances = HashMap::new();
+        let using_fgb = !self.index.fgb.is_empty() && (center.is_some() || bbox.is_some());
 
-            let mut filtered = RoaringBitmap::new();
-            for id in candidates.iter() {
-                if let Some(ecef) = self.index.get_ecef(id as u64) {
-                    let [x, y, z] = ecef;
-                    if let (Some(c), Some(r2)) = (center_ecef, radius_sq) {
-                        let dx = c.0 - x;
-                        let dy = c.1 - y;
-                        let dz = c.2 - z;
-                        if (dx * dx + dy * dy + dz * dz) as f64 <= r2 {
-                            filtered.insert(id);
+        let mut spatial_done = false;
+        // Recherche Spatiale via FlatGeoBuf (si disponible)
+        if using_fgb {
+            // On cherche le premier index FGB disponible
+            if let Some((field, fgb_mmap)) = self.index.fgb.iter().next() {
+                debug_log!(
+                    "[{:.3?}] FGB search starting on field '{}'",
+                    start_time.elapsed(),
+                    field
+                );
+                let mut cursor = std::io::Cursor::new(fgb_mmap.as_ref());
+                let fgb_reader = flatgeobuf::FgbReader::open(&mut cursor)?;
+
+                let search_bbox = if let Some(b) = bbox {
+                    b
+                } else if let (Some([lat, lon]), Some(r_m)) = (center, radius_m) {
+                    // Approximation rapide de BBox pour le cercle
+                    let lat_deg = r_m / 111320.0;
+                    let lon_deg = r_m / (111320.0 * (lat.to_radians().cos()));
+                    [lon - lon_deg, lat - lat_deg, lon + lon_deg, lat + lat_deg]
+                } else if let Some([lat, lon]) = center {
+                    [lon - 0.0001, lat - 0.0001, lon + 0.0001, lat + 0.0001]
+                } else {
+                    [0.0, 0.0, 0.0, 0.0]
+                };
+
+                let mut fgb_candidates = RoaringBitmap::new();
+                let mut features = fgb_reader.select_bbox(
+                    search_bbox[0],
+                    search_bbox[1],
+                    search_bbox[2],
+                    search_bbox[3],
+                )?;
+
+                let center_point = center.map(|[lat, lon]| geo::Point::new(lon, lat));
+
+                while let Some(feature) = features.next()? {
+                    let feat_id: u64 = feature.property_n(0)?;
+                    if candidates.is_empty() || candidates.contains(feat_id as u32) {
+                        if let Some(cp) = center_point {
+                            let geo_obj = feature.to_geo()?;
+                            let distance = match &geo_obj {
+                                geo::Geometry::Polygon(poly) => {
+                                    if poly.contains(&cp) {
+                                        0.0
+                                    } else {
+                                        match poly.closest_point(&cp) {
+                                            geo::Closest::SinglePoint(p)
+                                            | geo::Closest::Intersection(p) => {
+                                                Haversine.distance(p, cp)
+                                            }
+                                            _ => f64::INFINITY,
+                                        }
+                                    }
+                                }
+                                geo::Geometry::MultiPolygon(mpoly) => {
+                                    if mpoly.contains(&cp) {
+                                        0.0
+                                    } else {
+                                        match mpoly.closest_point(&cp) {
+                                            geo::Closest::SinglePoint(p)
+                                            | geo::Closest::Intersection(p) => {
+                                                Haversine.distance(p, cp)
+                                            }
+                                            _ => f64::INFINITY,
+                                        }
+                                    }
+                                }
+                                _ => f64::INFINITY,
+                            };
+
+                            fgb_distances.insert(feat_id, distance);
+
+                            let matches = if let Some(r_m) = radius_m {
+                                distance <= r_m
+                            } else {
+                                // Si pas de radius, on considère que ça match pour le moment
+                                // Le tri par distance se fera plus tard
+                                true
+                            };
+
+                            if matches {
+                                fgb_candidates.insert(feat_id as u32);
+                            }
+                        } else if bbox.is_some() {
+                            // Si bbox seulement, on garde tout
+                            fgb_candidates.insert(feat_id as u32);
                         }
                     }
                 }
+
+                if candidates.is_empty() {
+                    candidates = fgb_candidates;
+                } else {
+                    candidates &= fgb_candidates;
+                }
+                debug_log!(
+                    "[{:.3?}] FGB search done, candidates: {}",
+                    start_time.elapsed(),
+                    candidates.len()
+                );
+                spatial_done = true;
             }
-            candidates = filtered;
-            debug_log!(
-                "[{:.3?}] Spatial refinement done, candidates: {}",
-                start_time.elapsed(),
-                candidates.len()
-            );
+        }
+
+        if !spatial_done && (center.is_some() || radius_m.is_some()) {
+            if let (Some(center_pt), Some(radius_val)) = (center, radius_m) {
+                let r = 6371000.0;
+                let center_ecef = {
+                    let lat_rad = center_pt[0].to_radians();
+                    let lon_rad = center_pt[1].to_radians();
+                    let x = r * lat_rad.cos() * lon_rad.cos();
+                    let y = r * lat_rad.cos() * lon_rad.sin();
+                    let z = r * lat_rad.sin();
+                    Some((x as f32, y as f32, z as f32))
+                };
+                let radius_sq = Some(radius_val * radius_val);
+
+                let mut filtered = RoaringBitmap::new();
+                for id in candidates.iter() {
+                    if let Some(ecef) = self.index.get_ecef(id as u64) {
+                        let [x, y, z] = ecef;
+                        if let (Some(c), Some(r2)) = (center_ecef, radius_sq) {
+                            let dx = c.0 - x;
+                            let dy = c.1 - y;
+                            let dz = c.2 - z;
+                            if (dx * dx + dy * dy + dz * dz) as f64 <= r2 {
+                                filtered.insert(id);
+                            }
+                        }
+                    }
+                }
+                candidates = filtered;
+                debug_log!(
+                    "[{:.3?}] Spatial refinement done, candidates: {}",
+                    start_time.elapsed(),
+                    candidates.len()
+                );
+            }
         }
 
         if let Some(gb_field) = group_by {
@@ -875,26 +1024,57 @@ impl Engine {
         }
 
         let mut res = Vec::new();
-        for id in candidates.iter().take(limit.unwrap_or(100)) {
-            let dist = if let Some(center_pt) = center {
-                if let Some(p) = self.index.get_ecef(id as u64) {
-                    let r = 6371000.0;
-                    let lat_rad = center_pt[0].to_radians();
-                    let lon_rad = center_pt[1].to_radians();
-                    let cx = (r * lat_rad.cos() * lon_rad.cos()) as f32;
-                    let cy = (r * lat_rad.cos() * lon_rad.sin()) as f32;
-                    let cz = (r * lat_rad.sin()) as f32;
-                    let dx = cx - p[0];
-                    let dy = cy - p[1];
-                    let dz = cz - p[2];
-                    (dx * dx + dy * dy + dz * dz).sqrt() as f64
-                } else {
-                    0.0
-                }
+        let take_limit = limit.unwrap_or(100);
+
+        if let Some(center_pt) = center {
+            if using_fgb {
+                let mut sorted_by_dist: Vec<(u64, f64)> = candidates
+                    .iter()
+                    .map(|id| {
+                        let dist = fgb_distances
+                            .get(&(id as u64))
+                            .copied()
+                            .unwrap_or(f64::INFINITY);
+                        (id as u64, dist)
+                    })
+                    .collect();
+                sorted_by_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                res = sorted_by_dist.into_iter().take(take_limit).collect();
             } else {
-                0.0
-            };
-            res.push((id as u64, dist));
+                let mut heap = BinaryHeap::with_capacity(take_limit);
+                let r = 6371000.0;
+                let lat_rad = center_pt[0].to_radians();
+                let lon_rad = center_pt[1].to_radians();
+                let cx = (r * lat_rad.cos() * lon_rad.cos()) as f32;
+                let cy = (r * lat_rad.cos() * lon_rad.sin()) as f32;
+                let cz = (r * lat_rad.sin()) as f32;
+
+                for id in candidates.iter() {
+                    let dist = if let Some(p) = self.index.get_ecef(id as u64) {
+                        let dx = cx - p[0];
+                        let dy = cy - p[1];
+                        let dz = cz - p[2];
+                        (dx * dx + dy * dy + dz * dz).sqrt() as f64
+                    } else {
+                        0.0
+                    };
+
+                    if heap.len() < take_limit {
+                        heap.push((OrderedFloat(dist), id as u64));
+                    } else if let Some(mut top) = heap.peek_mut() {
+                        if dist < top.0 .0 {
+                            top.0 = OrderedFloat(dist);
+                            top.1 = id as u64;
+                        }
+                    }
+                }
+                let sorted_res: Vec<_> = heap.into_sorted_vec();
+                res = sorted_res.into_iter().map(|(d, id)| (id, d.0)).collect();
+            }
+        } else {
+            for id in candidates.iter().take(take_limit) {
+                res.push((id as u64, 0.0));
+            }
         }
 
         debug_log!("[{:.3?}] Search completed", start_time.elapsed());
@@ -1003,6 +1183,16 @@ impl<'a> Item<'a> {
                 map.insert(name, value);
             }
         }
+        if let Ok(Some(wkb_data)) = entry.geometry() {
+            let mut json_bytes = Vec::new();
+            let mut writer = geozero::geojson::GeoJsonWriter::new(&mut json_bytes);
+            use geozero::GeozeroGeometry;
+            if let Ok(_) = Wkb(wkb_data.to_vec()).process_geom(&mut writer) {
+                if let Ok(val) = serde_json::from_slice(&json_bytes) {
+                    map.insert("geometry".to_string(), val);
+                }
+            }
+        }
         JsonValue::Object(map)
     }
 
@@ -1043,17 +1233,29 @@ impl<'a> Item<'a> {
             }
         }
 
-        let geometry = if let Some(p) = engine.get_ecef(self.id) {
-            let r = 6371000.0;
-            let lat = (p[2] as f64 / r).asin().to_degrees();
-            let lon = (p[1] as f64).atan2(p[0] as f64).to_degrees();
-            json!({
-                "type": "Point",
-                "coordinates": [lon, lat]
-            })
-        } else {
-            JsonValue::Null
-        };
+        let mut geometry = JsonValue::Null;
+        if let Ok(Some(wkb_data)) = entry.geometry() {
+            let mut json_bytes = Vec::new();
+            let mut writer = geozero::geojson::GeoJsonWriter::new(&mut json_bytes);
+            use geozero::GeozeroGeometry;
+            if let Ok(_) = Wkb(wkb_data.to_vec()).process_geom(&mut writer) {
+                if let Ok(val) = serde_json::from_slice(&json_bytes) {
+                    geometry = val;
+                }
+            }
+        }
+
+        if geometry.is_null() {
+            if let Some(p) = engine.get_ecef(self.id) {
+                let r = 6371000.0;
+                let lat = (p[2] as f64 / r).asin().to_degrees();
+                let lon = (p[1] as f64).atan2(p[0] as f64).to_degrees();
+                geometry = json!({
+                    "type": "Point",
+                    "coordinates": [lon, lat]
+                });
+            }
+        }
 
         json!({
             "type": "Feature",
