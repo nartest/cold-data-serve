@@ -124,12 +124,6 @@ pub struct RangeQuery {
     pub max: Option<String>,
 }
 
-pub struct ColumnarIndex {
-    pub mmap: Mmap,
-    pub dict: Vec<String>,
-    pub width: u8,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IndexMetadata {
     pub name: String,
@@ -150,7 +144,6 @@ pub struct IndexStore {
     pub runtime_config: RuntimeConfig,
     pub h3: HashMap<u8, HashMap<u64, RoaringBitmap>>,
     pub secondary: HashMap<String, HashMap<String, RoaringBitmap>>,
-    pub columnar: HashMap<String, ColumnarIndex>,
     pub fst_mmaps: HashMap<String, (Mmap, Mmap, Option<Mmap>)>,
     pub coords_mmap: Option<Mmap>,
     pub ranges: HashMap<String, RangeIndex>,
@@ -354,39 +347,6 @@ impl IndexStore {
             }
         }
 
-        let mut columnar = HashMap::new();
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
-                    if filename.ends_with(".col") {
-                        let field = filename.trim_end_matches(".col").to_string();
-                        let dict_path = dir.join(format!("{}.dict", field));
-                        if let (Ok(col_file), Ok(mut dict_file)) =
-                            (File::open(&path), File::open(dict_path))
-                        {
-                            let mmap = unsafe { Mmap::map(&col_file)? };
-                            let width = mmap[0];
-                            use std::io::Read;
-                            let mut dict = Vec::new();
-                            let mut dict_buf = Vec::new();
-                            dict_file.read_to_end(&mut dict_buf)?;
-                            let mut cursor = std::io::Cursor::new(dict_buf);
-                            while cursor.position() < cursor.get_ref().len() as u64 {
-                                let mut len_buf = [0u8; 4];
-                                cursor.read_exact(&mut len_buf)?;
-                                let len = u32::from_le_bytes(len_buf) as usize;
-                                let mut val_buf = vec![0u8; len];
-                                cursor.read_exact(&mut val_buf)?;
-                                dict.push(String::from_utf8(val_buf)?);
-                            }
-                            columnar.insert(field, ColumnarIndex { mmap, dict, width });
-                        }
-                    }
-                }
-            }
-        }
-
         let mut fgb = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -414,7 +374,6 @@ impl IndexStore {
             runtime_config,
             h3,
             secondary,
-            columnar,
             fst_mmaps,
             coords_mmap,
             ranges,
@@ -465,22 +424,6 @@ impl IndexStore {
             }
         }
         None
-    }
-
-    pub fn get_column_value(&self, id: u64, field: &str) -> Option<&str> {
-        let col = self.columnar.get(field)?;
-        let idx = (id - 1) as usize;
-        let start = 1 + idx * col.width as usize;
-        if start + col.width as usize > col.mmap.len() {
-            return None;
-        }
-        let dict_idx = match col.width {
-            1 => col.mmap[start] as usize,
-            2 => u16::from_le_bytes(col.mmap[start..start + 2].try_into().unwrap()) as usize,
-            4 => u32::from_le_bytes(col.mmap[start..start + 4].try_into().unwrap()) as usize,
-            _ => return None,
-        };
-        col.dict.get(dict_idx).map(|s| s.as_str())
     }
 }
 
@@ -1083,18 +1026,25 @@ impl Engine {
 
     fn search_group_by(
         &self,
-        results: RoaringBitmap,
+        candidates: RoaringBitmap,
         gb_field: &str,
         limit_val: usize,
         center: Option<[f64; 2]>,
         start_time: Instant,
     ) -> Result<Vec<(u64, f64)>> {
         debug_log!(
-            "[{:.3?}] GroupBy starting on {} candidates for field '{}'",
+            "[{:.3?}] GroupBy starting on {} candidates for field '{}' (bitmap-based)",
             start_time.elapsed(),
-            results.len(),
+            candidates.len(),
             gb_field
         );
+
+        let group_index = if let Some(idx) = self.index.secondary.get(gb_field) {
+            idx
+        } else {
+            return Ok(Vec::new());
+        };
+
         let center_ecef = center.map(|[lat, lon]| {
             let r = 6371000.0;
             let lat_rad = lat.to_radians();
@@ -1105,40 +1055,49 @@ impl Engine {
             (x, y, z)
         });
 
-        use ordered_float::OrderedFloat;
-        use std::collections::BinaryHeap;
-
-        let mut groups: HashMap<String, BinaryHeap<(OrderedFloat<f32>, u64)>> = HashMap::new();
-        for id in results.iter() {
-            if let Some(val) = self.index.get_column_value(id as u64, gb_field) {
-                let dist_sq =
-                    if let (Some(c), Some(p)) = (center_ecef, self.index.get_ecef(id as u64)) {
-                        let dx = c.0 - p[0];
-                        let dy = c.1 - p[1];
-                        let dz = c.2 - p[2];
-                        dx * dx + dy * dy + dz * dz
-                    } else {
-                        0.0
-                    };
-
-                let heap = groups.entry(val.to_string()).or_default();
-                heap.push((OrderedFloat(-dist_sq), id as u64));
-            }
-        }
         let mut res = Vec::new();
-        let groups_count = groups.len();
-        for (_, mut heap) in groups {
-            if let Some((neg_dist_sq, id)) = heap.pop() {
-                res.push((id, (-neg_dist_sq.0).sqrt() as f64));
+
+        for (_group_value, group_bitmap) in group_index {
+            let match_bitmap = &candidates & group_bitmap;
+            if !match_bitmap.is_empty() {
+                // Trouver le meilleur candidat dans ce groupe (le plus proche si center est fourni, sinon le premier)
+                let mut best_id = 0u64;
+                let mut min_dist_sq = f32::INFINITY;
+
+                if let Some(c) = center_ecef {
+                    for id in match_bitmap.iter() {
+                        let dist_sq = if let Some(p) = self.index.get_ecef(id as u64) {
+                            let dx = c.0 - p[0];
+                            let dy = c.1 - p[1];
+                            let dz = c.2 - p[2];
+                            dx * dx + dy * dy + dz * dz
+                        } else {
+                            f32::INFINITY
+                        };
+
+                        if dist_sq < min_dist_sq {
+                            min_dist_sq = dist_sq;
+                            best_id = id as u64;
+                        }
+                    }
+                } else {
+                    best_id = match_bitmap.iter().next().unwrap() as u64;
+                    min_dist_sq = 0.0;
+                }
+
+                if best_id != 0 {
+                    res.push((best_id, (min_dist_sq as f64).sqrt()));
+                }
             }
         }
+
         res.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let final_res: Vec<_> = res.into_iter().take(limit_val).collect();
 
         debug_log!(
             "[{:.3?}] Search completed (GroupBy), found {} groups, {} total results",
             start_time.elapsed(),
-            groups_count,
+            final_res.len(),
             final_res.len()
         );
         Ok(final_res)

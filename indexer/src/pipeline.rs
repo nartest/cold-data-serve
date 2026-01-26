@@ -88,6 +88,18 @@ impl Pipeline {
         self.process_statistics(&conn)?;
         self.stream_and_process(&conn)?;
         self.finalize(&conn)?;
+
+        // Nettoyage après indexation : suppression de la base DuckDB et du dossier temporaire
+        drop(conn);
+        let db_path = self.output_dir.join("indexing.db");
+        if db_path.exists() {
+            fs::remove_file(db_path)?;
+        }
+        let temp_dir = self.output_dir.join("duckdb_tmp");
+        if temp_dir.exists() {
+            fs::remove_dir_all(temp_dir)?;
+        }
+
         Ok(())
     }
 
@@ -884,68 +896,6 @@ impl Pipeline {
                             bitmap.serialize_into(&mut buf)?;
                             file.write_all(&(buf.len() as u32).to_le_bytes())?;
                             file.write_all(&buf)?;
-                        }
-
-                        // Génération du stockage colonnaire pour le GroupBy (uniquement pour les bitmaps secondaires)
-                        if idx_config.r#type == IndexType::Bitmap {
-                            println!(
-                                "Generating columnar storage for GroupBy on '{}'...",
-                                col_name
-                            );
-                            let dict_path = self.output_dir.join(format!("{}.dict", col_name));
-                            let col_path = self.output_dir.join(format!("{}.col", col_name));
-
-                            let mut dict_file = BufWriter::new(File::create(dict_path)?);
-                            let mut dictionary = Vec::new();
-
-                            // On trie les valeurs pour un dictionnaire stable (optionnel mais propre)
-                            let mut sorted_vals: Vec<_> = values.keys().collect();
-                            sorted_vals.sort();
-
-                            for val in &sorted_vals {
-                                dictionary.push((*val).clone());
-                                let bytes = val.as_bytes();
-                                dict_file.write_all(&(bytes.len() as u32).to_le_bytes())?;
-                                dict_file.write_all(bytes)?;
-                            }
-                            dict_file.flush()?;
-
-                            let total_items = *self.current_data_offset.lock().unwrap() as usize;
-                            let width = if dictionary.len() < 256 {
-                                1
-                            } else if dictionary.len() < 65536 {
-                                2
-                            } else {
-                                4
-                            };
-
-                            let mut col_file = BufWriter::new(File::create(col_path)?);
-                            col_file.write_all(&[width as u8])?;
-
-                            // On pré-alloue le vecteur d'indices (0 = inconnu/null)
-                            // Note: dictionary index sera i + 1 car 0 est souvent réservé ou pour éviter les conflits
-                            // Mais get_column_value utilise dict.get(dict_idx), donc on va utiliser 0-based index.
-                            // Si on veut gérer le NULL, on pourrait décaler, mais ici on va juste remplir.
-                            let mut indices = vec![0u32; total_items];
-                            for (dict_idx, val) in sorted_vals.iter().enumerate() {
-                                if let Some(bitmap) = values.get(*val) {
-                                    for id in bitmap.iter() {
-                                        if id > 0 && id as usize <= total_items {
-                                            indices[id as usize - 1] = dict_idx as u32;
-                                        }
-                                    }
-                                }
-                            }
-
-                            for idx in indices {
-                                match width {
-                                    1 => col_file.write_all(&[idx as u8])?,
-                                    2 => col_file.write_all(&(idx as u16).to_le_bytes())?,
-                                    4 => col_file.write_all(&idx.to_le_bytes())?,
-                                    _ => {}
-                                }
-                            }
-                            col_file.flush()?;
                         }
                     }
                     file.flush()?;
