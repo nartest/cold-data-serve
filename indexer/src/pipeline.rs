@@ -571,9 +571,22 @@ impl Pipeline {
 
         // Build a mapping of columns to their indexed type
         let mut col_types = HashMap::new();
+        // Identify the active geometry column (last one defined, matching QueryBuilder logic)
+        let mut geo_col_name = None;
         for idx in &self.config.indexes {
             col_types.insert(idx.column.clone(), &idx.r#type);
+            if idx.r#type == IndexType::Geo {
+                geo_col_name = Some(&idx.column);
+            }
         }
+
+        // Determine if we should store geometry (WKB)
+        // Only if the identified geometry column is listed in storage.columns
+        let should_store_geometry = if let Some(name) = geo_col_name {
+            self.config.storage.columns.contains(name)
+        } else {
+            false
+        };
 
         for (row, wkb) in chunk {
             let mut fields = Vec::new();
@@ -648,7 +661,11 @@ impl Pipeline {
 
             let entry = Entry {
                 fields: Some(fields),
-                geometry: wkb.clone(),
+                geometry: if should_store_geometry {
+                    wkb.clone()
+                } else {
+                    None
+                },
             };
             let mut builder = planus::Builder::new();
             let result = builder.finish(entry, None);
