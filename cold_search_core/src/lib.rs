@@ -1060,11 +1060,9 @@ impl Engine {
         for (_group_value, group_bitmap) in group_index {
             let match_bitmap = &candidates & group_bitmap;
             if !match_bitmap.is_empty() {
-                // Trouver le meilleur candidat dans ce groupe (le plus proche si center est fourni, sinon le premier)
-                let mut best_id = 0u64;
-                let mut min_dist_sq = f32::INFINITY;
-
+                // Collecter les meilleurs candidats de ce groupe
                 if let Some(c) = center_ecef {
+                    let mut group_results = Vec::new();
                     for id in match_bitmap.iter() {
                         let dist_sq = if let Some(p) = self.index.get_ecef(id as u64) {
                             let dx = c.0 - p[0];
@@ -1074,25 +1072,27 @@ impl Engine {
                         } else {
                             f32::INFINITY
                         };
-
-                        if dist_sq < min_dist_sq {
-                            min_dist_sq = dist_sq;
-                            best_id = id as u64;
-                        }
+                        group_results.push((id as u64, dist_sq));
+                    }
+                    // Trier par distance pour ce groupe et prendre top_n
+                    group_results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                    for (id, dist_sq) in group_results.into_iter().take(limit_val) {
+                        res.push((id, (dist_sq as f64).sqrt()));
                     }
                 } else {
-                    best_id = match_bitmap.iter().next().unwrap() as u64;
-                    min_dist_sq = 0.0;
-                }
-
-                if best_id != 0 {
-                    res.push((best_id, (min_dist_sq as f64).sqrt()));
+                    // Pas de centre, on prend juste les top_n premiers IDs du bitmap
+                    for id in match_bitmap.iter().take(limit_val) {
+                        res.push((id as u64, 0.0));
+                    }
                 }
             }
         }
 
-        res.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let final_res: Vec<_> = res.into_iter().take(limit_val).collect();
+        // Tri final global (optionnel selon le besoin, mais ici on garde par distance si center présent)
+        if center_ecef.is_some() {
+            res.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        let final_res = res;
 
         debug_log!(
             "[{:.3?}] Search completed (GroupBy), found {} groups, {} total results",
