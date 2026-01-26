@@ -9,6 +9,10 @@ jobs:
   build-release:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: write  # Permet de créer/modifier des releases et d'uploader des assets
+
     strategy:
       fail-fast: false # Évite que l'échec d'un OS n'annule les autres
       matrix:
