@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Se déclenche lors d'un tag comme v1.0.0
+
+jobs:
+  build-release:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # Évite que l'échec d'un OS n'annule les autres
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name_suffix: linux-amd64
+          - os: windows-latest
+            asset_name_suffix: windows-amd64.exe
+          - os: macos-latest
+            asset_name_suffix: macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Binary
+        run: cargo build --release --locked
+
+      # Upload du premier binaire : indexer
+      - name: Upload Indexer
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          # On cible le binaire "indexer" dans le dossier release
+          file: target/release/indexer${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          asset_name: indexer-${{ matrix.asset_name_suffix }}
+          tag: ${{ github.ref }}
+
+      # Upload du second binaire : server
+      - name: Upload Server
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          # On cible le binaire "server"
+          file: target/release/server${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          asset_name: server-${{ matrix.asset_name_suffix }}
+          tag: ${{ github.ref }}
