@@ -173,7 +173,6 @@ impl Pipeline {
 
         conn.execute_batch(&format!(
             "PRAGMA temp_directory = '{}';
-             PRAGMA memory_limit = '4GB';
              SET preserve_insertion_order = false;
              SET wal_autocheckpoint = '1GB';
              INSTALL spatial; LOAD spatial;",
