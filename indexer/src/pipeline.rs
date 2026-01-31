@@ -39,6 +39,8 @@ pub struct Pipeline {
     range_values: Arc<Mutex<HashMap<String, Vec<f64>>>>,
     // Stratégie géométrique par colonne (H3 ou FGB)
     geo_strategies: Arc<Mutex<HashMap<String, GeoStrategy>>>,
+    memory_limit: String,
+    threads: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,7 +50,12 @@ pub enum GeoStrategy {
 }
 
 impl Pipeline {
-    pub fn new(config: ConfigV2, output_dir: PathBuf) -> Result<Self> {
+    pub fn new(
+        config: ConfigV2,
+        output_dir: PathBuf,
+        memory_limit: String,
+        threads: usize,
+    ) -> Result<Self> {
         if output_dir.exists() {
             println!("Cleaning output directory: {:?}", output_dir);
             // On supprime le contenu mais on garde le dossier
@@ -78,6 +85,8 @@ impl Pipeline {
             primary_fst: Arc::new(Mutex::new(BTreeMap::new())),
             range_values: Arc::new(Mutex::new(HashMap::new())),
             geo_strategies: Arc::new(Mutex::new(HashMap::new())),
+            memory_limit,
+            threads,
         })
     }
 
@@ -174,9 +183,13 @@ impl Pipeline {
         conn.execute_batch(&format!(
             "PRAGMA temp_directory = '{}';
              SET preserve_insertion_order = false;
+             SET threads={};
+             SET memory_limit='{}';
              SET wal_autocheckpoint = '1GB';
              INSTALL spatial; LOAD spatial;",
-            temp_dir.display()
+            temp_dir.display(),
+            self.threads,
+            self.memory_limit
         ))?;
 
         Ok(conn)
@@ -1013,7 +1026,7 @@ indexes:
         );
 
         let config = ConfigV2::from_yaml_str(&yaml).unwrap();
-        let pipeline = Pipeline::new(config, temp_dir.clone()).unwrap();
+        let pipeline = Pipeline::new(config, temp_dir.clone(), "1GB".to_string(), 1).unwrap();
         pipeline.run().unwrap();
 
         let bitmaps_lock = pipeline.bitmaps.lock().unwrap();
@@ -1063,7 +1076,7 @@ indexes:
         );
 
         let config = ConfigV2::from_yaml_str(&yaml).unwrap();
-        let pipeline = Pipeline::new(config, temp_dir.clone()).unwrap();
+        let pipeline = Pipeline::new(config, temp_dir.clone(), "1GB".to_string(), 1).unwrap();
         pipeline.run().unwrap();
 
         // Vérifier les fichiers produits
@@ -1112,7 +1125,7 @@ indexes:
         );
 
         let config = ConfigV2::from_yaml_str(&yaml).unwrap();
-        let pipeline = Pipeline::new(config, temp_dir.clone()).unwrap();
+        let pipeline = Pipeline::new(config, temp_dir.clone(), "1GB".to_string(), 1).unwrap();
 
         // Ce call devrait probablement paniquer ou retourner une erreur car GeoShape n'est pas géré
         let result = pipeline.run();

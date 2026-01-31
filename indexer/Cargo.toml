@@ -21,3 +21,4 @@ chrono = "0.4"
 flatgeobuf = "6.0"
 geozero = { version = "0.15", features = ["with-wkb", "with-geo"] }
 geo = "0.32"
+sysinfo = "0.30"

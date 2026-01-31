@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use cold_search_core::config_v2::ConfigV2;
 use std::path::PathBuf;
+use sysinfo::System;
 
 mod pipeline;
 mod query_builder;
@@ -24,6 +25,14 @@ struct Args {
     /// Enable debug logs
     #[arg(long)]
     debug: bool,
+
+    /// Memory limit for DuckDB (e.g., "128GB", "80%"). Defaults to 70% of total RAM.
+    #[arg(short, long)]
+    memory: Option<String>,
+
+    /// Number of threads for DuckDB. Defaults to number of physical CPUs - 2.
+    #[arg(short, long)]
+    threads: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -42,7 +51,31 @@ fn main() -> Result<()> {
     println!("Indexing collection: {}", config.collection);
     println!("Output directory: {:?}", args.output);
 
-    let pipeline = pipeline::Pipeline::new(config, args.output)?;
+    // Détection dynamique des ressources
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+
+    let final_threads = args.threads.unwrap_or_else(|| {
+        let cpus = sys.physical_core_count().unwrap_or(4);
+        if cpus > 2 {
+            cpus - 2
+        } else {
+            1
+        }
+    });
+
+    let final_memory = args.memory.unwrap_or_else(|| {
+        let total_ram = sys.total_memory();
+        let target_ram = (total_ram as f64 * 0.7) as u64;
+        let gb = target_ram / (1024 * 1024 * 1024);
+        format!("{}GB", gb)
+    });
+
+    println!("Resource allocation:");
+    println!("  - Threads: {}", final_threads);
+    println!("  - Memory limit: {}", final_memory);
+
+    let pipeline = pipeline::Pipeline::new(config, args.output, final_memory, final_threads)?;
     pipeline.run()?;
 
     println!("Indexing completed successfully!");

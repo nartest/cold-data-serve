@@ -150,6 +150,8 @@ Une fois le profil YAML écrit, lancez l’indexeur :
 - `--profile` (obligatoire) : chemin vers le fichier YAML.
 - `--output` (obligatoire) : répertoire où seront écrits les fichiers d’index.
 - `--input` (facultatif) : surcharge le chemin `source.path` défini dans le profil.
+- `--memory`, `-m` : limite de mémoire pour DuckDB (ex: "128GB", "80%"). Par défaut, 70% de la RAM totale est allouée.
+- `--threads`, `-t` : nombre de threads pour DuckDB. Par défaut, utilise le nombre de cœurs physiques moins 2.
 - `--debug` : active les logs de débogage.
 
 **Fichiers générés** :
